@@ -229,10 +229,9 @@ class McpClient:
             msg["params"] = params
 
         payload = json.dumps(msg).encode("utf-8")
-        header = f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii")
 
         try:
-            self._proc.stdin.write(header + payload)
+            self._proc.stdin.write(payload + b"\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             raise McpError(f"Failed to send request to MCP server: {exc}") from exc
@@ -242,7 +241,7 @@ class McpClient:
     def _read_response(self, expected_id, timeout=60):
         """Read a JSON-RPC response with the expected id from stdout.
 
-        Uses Content-Length header framing. Skips notifications (messages without id).
+        Uses newline-delimited JSON. Skips notifications (messages without id).
         """
         deadline = time.time() + timeout
 
@@ -258,35 +257,19 @@ class McpClient:
                     pass
                 raise McpError(f"MCP server exited unexpectedly (code={self._proc.returncode}). stderr: {stderr_out[:1000]}")
 
-            # Read Content-Length header
-            content_length = None
-            while True:
-                line = self._proc.stdout.readline()
-                if not line:
-                    raise McpError("MCP server closed stdout unexpectedly")
-                line_str = line.decode("ascii", errors="replace").strip()
-                if line_str == "":
-                    # Empty line signals end of headers
-                    if content_length is not None:
-                        break
-                    # Could be a spurious empty line, continue
-                    continue
-                m = re.match(r"Content-Length:\s*(\d+)", line_str, re.IGNORECASE)
-                if m:
-                    content_length = int(m.group(1))
+            line = self._proc.stdout.readline()
+            if not line:
+                raise McpError("MCP server closed stdout unexpectedly")
 
-            # Read exactly content_length bytes
-            data = b""
-            while len(data) < content_length:
-                chunk = self._proc.stdout.read(content_length - len(data))
-                if not chunk:
-                    raise McpError("MCP server closed stdout while reading payload")
-                data += chunk
+            line_str = line.decode("utf-8", errors="replace").strip()
+            if not line_str:
+                continue
 
             try:
-                msg = json.loads(data.decode("utf-8"))
+                msg = json.loads(line_str)
             except json.JSONDecodeError as exc:
-                raise McpError(f"Invalid JSON from MCP server: {exc}") from exc
+                # Could be a partial line or non-JSON output, skip
+                continue
 
             # Skip notifications (no id field)
             if "id" not in msg:
@@ -298,7 +281,7 @@ class McpClient:
                     raise McpError(f"MCP error {err.get('code', '?')}: {err.get('message', 'unknown')}")
                 return msg.get("result", {})
 
-            # Not our id — skip (shouldn't normally happen)
+            # Not our id — skip
             continue
 
     # -- high-level MCP methods ----------------------------------------------
@@ -319,9 +302,8 @@ class McpClient:
 
         # Send initialized notification (no id, no response expected)
         notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}).encode("utf-8")
-        header = f"Content-Length: {len(notif)}\r\n\r\n".encode("ascii")
         try:
-            self._proc.stdin.write(header + notif)
+            self._proc.stdin.write(notif + b"\n")
             self._proc.stdin.flush()
         except Exception:
             pass

@@ -230,23 +230,11 @@ runs:
         $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
 
         Write-Host "Fetching latest release from $apiUrl ..."
-        try {
-          $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "mcp-windbg-action" }
-        } catch {
-          Write-Host "::error::Failed to fetch latest release info: $_"
-          exit 1
-        }
+        $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "mcp-windbg-action" }
 
-        # Find the Windows binary asset
-        $asset = $release.assets | Where-Object { $_.name -match 'mcp-windbg.*\.exe$' -or $_.name -match 'mcp_windbg.*\.exe$' } | Select-Object -First 1
-
+        $asset = $release.assets | Where-Object { $_.name -like '*.exe' } | Select-Object -First 1
         if (-not $asset) {
-          # Fallback: look for any .exe asset
-          $asset = $release.assets | Where-Object { $_.name -like '*.exe' } | Select-Object -First 1
-        }
-
-        if (-not $asset) {
-          Write-Host "::error::No suitable binary found in release $($release.tag_name)"
+          Write-Host "::error::No .exe asset found in release $($release.tag_name)"
           exit 1
         }
 
@@ -254,16 +242,21 @@ runs:
         $serverPath = Join-Path $env:GITHUB_WORKSPACE "mcp-windbg-rs.exe"
 
         Write-Host "Downloading $($asset.name) from $downloadUrl ..."
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $serverPath -UseBasicParsing
+
+        Write-Host "Downloaded: $serverPath ($((Get-Item $serverPath).Length) bytes)"
+
+        # Quick sanity check - run with --help to verify binary works
+        Write-Host "Verifying binary..."
         try {
-          Invoke-WebRequest -Uri $downloadUrl -OutFile $serverPath -UseBasicParsing
+          $helpOutput = & $serverPath --help 2>&1
+          Write-Host "Binary OK: $($helpOutput[0])"
         } catch {
-          Write-Host "::error::Failed to download mcp-windbg-rs binary: $_"
+          Write-Host "::error::Binary verification failed: $_"
           exit 1
         }
 
-        Write-Host "Downloaded mcp-windbg-rs to: $serverPath ($((Get-Item $serverPath).Length) bytes)"
         echo "MCP_SERVER_PATH=$serverPath" >> $env:GITHUB_ENV
-
         Write-Host "::endgroup::"
 
     # ── Step 4: Run AI analysis via mcp_client.py ─────────────────────────
