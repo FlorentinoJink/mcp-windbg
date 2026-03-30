@@ -137,8 +137,8 @@ runs:
           Write-Host "Trigger: issues event. Parsing Issue body for attachments..."
           $body = $env:ISSUE_BODY
           if ($body) {
-            # Match GitHub attachment URLs for .dmp, .pdb, .exe files
-            $pattern = 'https://github\.com/[^\s\)]+\.(?:dmp|pdb|exe)'
+            # Match GitHub attachment URLs for .dmp, .pdb, .exe, .zip files
+            $pattern = 'https://github\.com/[^\s\)]+\.(?:dmp|pdb|exe|zip)'
             $matches = [regex]::Matches($body, $pattern, 'IgnoreCase')
             foreach ($m in $matches) {
               $urls += $m.Value
@@ -166,10 +166,10 @@ runs:
           Write-Host "Unhandled event type: $env:GITHUB_EVENT_NAME"
         }
 
-        # Check if we have any dump/exe files to analyze
+        # Check if we have any dump/exe/zip files to analyze
         $hasDumpOrExe = $false
         foreach ($u in $urls) {
-          if ($u -match '\.(?:dmp|exe)$') {
+          if ($u -match '\.(?:dmp|exe|zip)$') {
             $hasDumpOrExe = $true
             break
           }
@@ -199,6 +199,22 @@ runs:
 
         echo "DOWNLOAD_DIR=$downloadDir" >> $env:GITHUB_ENV
         echo "SKIP_ANALYSIS=false" >> $env:GITHUB_ENV
+
+        # Extract any .zip files
+        Get-ChildItem -Path $downloadDir -Filter "*.zip" | ForEach-Object {
+          Write-Host "Extracting: $($_.Name)"
+          try {
+            Expand-Archive -Path $_.FullName -DestinationPath $downloadDir -Force
+            Remove-Item $_.FullName
+            Write-Host "  Extracted and removed zip."
+          } catch {
+            Write-Host "::warning::Failed to extract $($_.Name): $_"
+          }
+        }
+
+        # List final files
+        Write-Host "Files in download dir:"
+        Get-ChildItem -Path $downloadDir | ForEach-Object { Write-Host "  $($_.Name) ($($_.Length) bytes)" }
 
         Write-Host "::endgroup::"
 
