@@ -323,4 +323,96 @@ mod tests {
         assert!(json.contains("\"type\":\"text\""));
         assert!(json.contains("\"text\":\"test output\""));
     }
+
+    // --- Additional coverage for program_path ---
+
+    #[test]
+    fn test_validate_only_program_path() {
+        let params = RunWindbgCmdParams {
+            dump_path: None,
+            connection_string: None,
+            program_path: Some("app.exe".to_string()),
+            command: "k".to_string(),
+        };
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_program_path_with_dump_path() {
+        let params = RunWindbgCmdParams {
+            dump_path: Some("test.dmp".to_string()),
+            connection_string: None,
+            program_path: Some("app.exe".to_string()),
+            command: "k".to_string(),
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_all_three_provided() {
+        let params = RunWindbgCmdParams {
+            dump_path: Some("test.dmp".to_string()),
+            connection_string: Some("tcp:Port=5005".to_string()),
+            program_path: Some("app.exe".to_string()),
+            command: "k".to_string(),
+        };
+        assert!(params.validate().is_err());
+    }
+
+    #[test]
+    fn test_session_identifier_program_path() {
+        let params = RunWindbgCmdParams {
+            dump_path: None,
+            connection_string: None,
+            program_path: Some("C:\\app.exe".to_string()),
+            command: "k".to_string(),
+        };
+        assert_eq!(params.session_identifier(), Some("C:\\app.exe"));
+    }
+
+    #[test]
+    fn test_session_identifier_none() {
+        let params = RunWindbgCmdParams {
+            dump_path: None,
+            connection_string: None,
+            program_path: None,
+            command: "k".to_string(),
+        };
+        assert_eq!(params.session_identifier(), None);
+    }
+
+    #[test]
+    fn test_session_identifier_priority() {
+        // dump_path takes priority over connection_string and program_path
+        let params = RunWindbgCmdParams {
+            dump_path: Some("test.dmp".to_string()),
+            connection_string: Some("tcp:Port=5005".to_string()),
+            program_path: Some("app.exe".to_string()),
+            command: "k".to_string(),
+        };
+        assert_eq!(params.session_identifier(), Some("test.dmp"));
+    }
+
+    #[test]
+    fn test_tool_response_texts_empty() {
+        let response = ToolResponse::texts(vec![]);
+        assert_eq!(response.content.len(), 0);
+    }
+
+    #[test]
+    fn test_deserialize_run_windbg_cmd_with_program_path() {
+        let json = r#"{"program_path": "C:\\app.exe", "command": "k"}"#;
+        let params: RunWindbgCmdParams = serde_json::from_str(json).unwrap();
+        assert!(params.dump_path.is_none());
+        assert!(params.connection_string.is_none());
+        assert_eq!(params.program_path.as_deref(), Some("C:\\app.exe"));
+        assert_eq!(params.command, "k");
+    }
+
+    #[test]
+    fn test_deserialize_launch_debug_empty_arguments() {
+        let json = r#"{"program_path": "app.exe", "arguments": []}"#;
+        let params: LaunchDebugParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.arguments.as_ref().unwrap().len(), 0);
+    }
 }

@@ -662,6 +662,89 @@ mod tests {
     fn test_server_new() {
         let config = ServerConfig::default();
         let _server = McpServer::new(config);
-        // 服务器创建成功
+    }
+
+    #[test]
+    fn test_list_tools_count() {
+        let server = McpServer::new(ServerConfig::default());
+        let tools = server.list_tools();
+        assert_eq!(tools.len(), 8);
+    }
+
+    #[test]
+    fn test_list_tools_names() {
+        let server = McpServer::new(ServerConfig::default());
+        let tools = server.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"open_windbg_dump"));
+        assert!(names.contains(&"open_windbg_remote"));
+        assert!(names.contains(&"run_windbg_cmd"));
+        assert!(names.contains(&"close_windbg_dump"));
+        assert!(names.contains(&"close_windbg_remote"));
+        assert!(names.contains(&"launch_debug"));
+        assert!(names.contains(&"close_debug"));
+        assert!(names.contains(&"list_windbg_dumps"));
+    }
+
+    #[test]
+    fn test_all_tools_have_descriptions() {
+        let server = McpServer::new(ServerConfig::default());
+        for tool in server.list_tools() {
+            assert!(!tool.description.is_empty(), "Tool {} has empty description", tool.name);
+        }
+    }
+
+    #[test]
+    fn test_all_tool_schemas_have_property_descriptions() {
+        let server = McpServer::new(ServerConfig::default());
+        for tool in server.list_tools() {
+            if let Some(props) = tool.input_schema.get("properties") {
+                if let Some(obj) = props.as_object() {
+                    for (param_name, param_schema) in obj {
+                        assert!(
+                            param_schema.get("description").is_some(),
+                            "Tool '{}' param '{}' missing description",
+                            tool.name, param_name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_launch_debug_schema_required_fields() {
+        let server = McpServer::new(ServerConfig::default());
+        let tools = server.list_tools();
+        let launch = tools.iter().find(|t| t.name == "launch_debug").unwrap();
+        let required = launch.input_schema.get("required").unwrap().as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].as_str().unwrap(), "program_path");
+    }
+
+    #[test]
+    fn test_run_windbg_cmd_schema_has_program_path() {
+        let server = McpServer::new(ServerConfig::default());
+        let tools = server.list_tools();
+        let cmd = tools.iter().find(|t| t.name == "run_windbg_cmd").unwrap();
+        let props = cmd.input_schema.get("properties").unwrap();
+        assert!(props.get("program_path").is_some());
+        assert!(props.get("dump_path").is_some());
+        assert!(props.get("connection_string").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_handle_tool_call_unknown_tool() {
+        let server = McpServer::new(ServerConfig::default());
+        let result = server.handle_tool_call("nonexistent_tool", serde_json::json!({})).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_tool_call_invalid_params() {
+        let server = McpServer::new(ServerConfig::default());
+        // Missing required dump_path
+        let result = server.handle_tool_call("open_windbg_dump", serde_json::json!({})).await;
+        assert!(result.is_err());
     }
 }
