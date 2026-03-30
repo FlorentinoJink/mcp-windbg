@@ -1,0 +1,34 @@
+name: AI Dump Analysis
+
+on:
+  issues:
+    types: [opened, edited]
+  workflow_dispatch:
+    inputs:
+      extra-files:
+        description: 'File URLs to download (one per line)'
+        required: false
+      model:
+        description: 'LLM model name'
+        required: false
+        default: 'gpt-4o'
+      api-base:
+        description: 'LLM API base URL'
+        required: false
+        default: 'https://api.openai.com/v1'
+
+jobs:
+  analyze:
+    runs-on: windows-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./action
+        with:
+          api_key: ${{ secrets.AI_API_KEY }}
+          api_base: ${{ github.event.inputs.api-base || 'https://api.openai.com/v1' }}
+          model: ${{ github.event.inputs.model || 'gpt-4o' }}
+          extra-files: ${{ github.event.inputs.extra-files || '' }}
+          post-comment: 'true'

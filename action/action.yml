@@ -1,0 +1,351 @@
+name: 'MCP WinDbg Dump Analysis'
+description: >
+  AI-powered Windows crash dump analysis using mcp-windbg-rs as MCP Server.
+  Automatically analyzes .dmp files via LLM + MCP tool calling loop.
+  NOTE: This action ONLY supports windows-latest runners.
+
+inputs:
+  api_key:
+    description: 'LLM API authentication key'
+    required: true
+  api_base:
+    description: 'LLM API base URL (e.g. https://api.openai.com/v1)'
+    required: true
+  model:
+    description: 'LLM model name (e.g. gpt-4o)'
+    required: true
+  issue-number:
+    description: 'Issue number to post analysis comment to'
+    required: false
+  post-comment:
+    description: 'Whether to post analysis report as Issue comment'
+    required: false
+    default: 'true'
+  max-turns:
+    description: 'Maximum AI tool-calling turns'
+    required: false
+    default: '30'
+  timeout:
+    description: 'Analysis timeout in seconds'
+    required: false
+    default: '300'
+  system-prompt:
+    description: 'Custom system prompt for the LLM'
+    required: false
+  extra-files:
+    description: 'Extra file URLs to download (newline-separated)'
+    required: false
+  symbols-path:
+    description: 'Debug symbols path for CDB'
+    required: false
+    default: 'SRV*C:\Symbols*https://msdl.microsoft.com/download/symbols'
+
+outputs:
+  analysis-result:
+    description: 'AI-generated crash analysis report (Markdown)'
+    value: ${{ steps.post-results.outputs.analysis-result }}
+
+runs:
+  using: composite
+  steps:
+
+    # ── Step 1: Install / Detect CDB ──────────────────────────────────────
+    - name: Install CDB
+      id: install-cdb
+      shell: pwsh
+      run: |
+        Write-Host "::group::Step 1 - Detect / Install CDB"
+
+        $cdbPath = $null
+
+        # Search common installation paths
+        $searchPaths = @(
+          "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe",
+          "C:\Program Files\Windows Kits\10\Debuggers\x64\cdb.exe",
+          "C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\cdb.exe",
+          "C:\Program Files\Debugging Tools for Windows (x64)\cdb.exe",
+          "$env:LOCALAPPDATA\Microsoft\WinDbg\*\amd64\cdb.exe"
+        )
+
+        foreach ($p in $searchPaths) {
+          $resolved = Resolve-Path -Path $p -ErrorAction SilentlyContinue
+          if ($resolved) {
+            $cdbPath = $resolved.Path | Select-Object -First 1
+            Write-Host "Found CDB at: $cdbPath"
+            break
+          }
+        }
+
+        # Check PATH
+        if (-not $cdbPath) {
+          $inPath = Get-Command cdb.exe -ErrorAction SilentlyContinue
+          if ($inPath) {
+            $cdbPath = $inPath.Source
+            Write-Host "Found CDB in PATH: $cdbPath"
+          }
+        }
+
+        # Install via winget if not found
+        if (-not $cdbPath) {
+          Write-Host "CDB not found. Installing Microsoft.WinDbg via winget..."
+          try {
+            winget install Microsoft.WinDbg --accept-source-agreements --accept-package-agreements
+            if ($LASTEXITCODE -ne 0) { throw "winget exited with code $LASTEXITCODE" }
+          } catch {
+            Write-Host "::error::Failed to install CDB via winget: $_"
+            exit 1
+          }
+
+          # Re-search after installation
+          foreach ($p in $searchPaths) {
+            $resolved = Resolve-Path -Path $p -ErrorAction SilentlyContinue
+            if ($resolved) {
+              $cdbPath = $resolved.Path | Select-Object -First 1
+              Write-Host "Found CDB after install at: $cdbPath"
+              break
+            }
+          }
+        }
+
+        if (-not $cdbPath) {
+          Write-Host "::error::CDB (cdb.exe) could not be found after installation attempt."
+          exit 1
+        }
+
+        Write-Host "Using CDB: $cdbPath"
+        echo "CDB_PATH=$cdbPath" >> $env:GITHUB_ENV
+
+        Write-Host "::endgroup::"
+
+    # ── Step 2: Download dump / pdb / exe files ───────────────────────────
+    - name: Download files
+      id: download-files
+      shell: pwsh
+      env:
+        EXTRA_FILES: ${{ inputs.extra-files }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        ISSUE_BODY: ${{ github.event.issue.body }}
+      run: |
+        Write-Host "::group::Step 2 - Download attachment files"
+
+        $downloadDir = Join-Path $env:GITHUB_WORKSPACE "dump_files"
+        New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+
+        $urls = @()
+
+        if ($env:GITHUB_EVENT_NAME -eq "issues") {
+          Write-Host "Trigger: issues event. Parsing Issue body for attachments..."
+          $body = $env:ISSUE_BODY
+          if ($body) {
+            # Match GitHub attachment URLs for .dmp, .pdb, .exe files
+            $pattern = 'https://github\.com/[^\s\)]+\.(?:dmp|pdb|exe)'
+            $matches = [regex]::Matches($body, $pattern, 'IgnoreCase')
+            foreach ($m in $matches) {
+              $urls += $m.Value
+            }
+            # Also match GitHub user-attachments/assets URLs
+            $assetsPattern = 'https://github\.com/[^\s\)]+/assets/[^\s\)]+'
+            $assetMatches = [regex]::Matches($body, $assetsPattern, 'IgnoreCase')
+            foreach ($m in $assetMatches) {
+              $urls += $m.Value
+            }
+            $urls = $urls | Select-Object -Unique
+            Write-Host "Found $($urls.Count) attachment URL(s) in Issue body."
+          } else {
+            Write-Host "Issue body is empty."
+          }
+        } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+          Write-Host "Trigger: workflow_dispatch. Using extra-files input..."
+          if ($env:EXTRA_FILES) {
+            $urls = $env:EXTRA_FILES -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+            Write-Host "Found $($urls.Count) URL(s) from extra-files input."
+          } else {
+            Write-Host "No extra-files provided."
+          }
+        } else {
+          Write-Host "Unhandled event type: $env:GITHUB_EVENT_NAME"
+        }
+
+        # Check if we have any dump/exe files to analyze
+        $hasDumpOrExe = $false
+        foreach ($u in $urls) {
+          if ($u -match '\.(?:dmp|exe)$') {
+            $hasDumpOrExe = $true
+            break
+          }
+        }
+
+        if ($urls.Count -eq 0 -or -not $hasDumpOrExe) {
+          Write-Host "No .dmp or .exe attachments found. Skipping analysis."
+          echo "SKIP_ANALYSIS=true" >> $env:GITHUB_ENV
+          Write-Host "::endgroup::"
+          exit 0
+        }
+
+        # Download all files
+        foreach ($url in $urls) {
+          $fileName = [System.IO.Path]::GetFileName(([Uri]$url).LocalPath)
+          if (-not $fileName) { $fileName = "file_$(Get-Random)" }
+          $destPath = Join-Path $downloadDir $fileName
+          Write-Host "Downloading: $url -> $destPath"
+          try {
+            Invoke-WebRequest -Uri $url -OutFile $destPath -UseBasicParsing -MaximumRedirection 5
+            Write-Host "  OK ($((Get-Item $destPath).Length) bytes)"
+          } catch {
+            Write-Host "::error::Failed to download $url : $_"
+            exit 1
+          }
+        }
+
+        echo "DOWNLOAD_DIR=$downloadDir" >> $env:GITHUB_ENV
+        echo "SKIP_ANALYSIS=false" >> $env:GITHUB_ENV
+
+        Write-Host "::endgroup::"
+
+    # ── Step 3: Download mcp-windbg-rs binary ─────────────────────────────
+    - name: Download MCP Server
+      id: download-server
+      if: env.SKIP_ANALYSIS != 'true'
+      shell: pwsh
+      run: |
+        Write-Host "::group::Step 3 - Download mcp-windbg-rs"
+
+        $repo = "FlorentinoJink/mcp-windbg"
+        $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
+
+        Write-Host "Fetching latest release from $apiUrl ..."
+        try {
+          $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "mcp-windbg-action" }
+        } catch {
+          Write-Host "::error::Failed to fetch latest release info: $_"
+          exit 1
+        }
+
+        # Find the Windows binary asset
+        $asset = $release.assets | Where-Object { $_.name -match 'mcp-windbg.*\.exe$' -or $_.name -match 'mcp_windbg.*\.exe$' } | Select-Object -First 1
+
+        if (-not $asset) {
+          # Fallback: look for any .exe asset
+          $asset = $release.assets | Where-Object { $_.name -like '*.exe' } | Select-Object -First 1
+        }
+
+        if (-not $asset) {
+          Write-Host "::error::No suitable binary found in release $($release.tag_name)"
+          exit 1
+        }
+
+        $downloadUrl = $asset.browser_download_url
+        $serverPath = Join-Path $env:GITHUB_WORKSPACE "mcp-windbg-rs.exe"
+
+        Write-Host "Downloading $($asset.name) from $downloadUrl ..."
+        try {
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $serverPath -UseBasicParsing
+        } catch {
+          Write-Host "::error::Failed to download mcp-windbg-rs binary: $_"
+          exit 1
+        }
+
+        Write-Host "Downloaded mcp-windbg-rs to: $serverPath ($((Get-Item $serverPath).Length) bytes)"
+        echo "MCP_SERVER_PATH=$serverPath" >> $env:GITHUB_ENV
+
+        Write-Host "::endgroup::"
+
+    # ── Step 4: Run AI analysis via mcp_client.py ─────────────────────────
+    - name: Run analysis
+      id: run-analysis
+      if: env.SKIP_ANALYSIS != 'true'
+      shell: pwsh
+      env:
+        API_KEY: ${{ inputs.api_key }}
+        API_BASE: ${{ inputs.api_base }}
+        MODEL: ${{ inputs.model }}
+        MAX_TURNS: ${{ inputs.max-turns }}
+        TIMEOUT: ${{ inputs.timeout }}
+        SYSTEM_PROMPT: ${{ inputs.system-prompt }}
+        SYMBOLS_PATH: ${{ inputs.symbols-path }}
+      run: |
+        python ${{ github.action_path }}/mcp_client.py
+
+    # ── Step 5: Post results ──────────────────────────────────────────────
+    - name: Post results
+      id: post-results
+      if: env.SKIP_ANALYSIS != 'true'
+      shell: pwsh
+      env:
+        POST_COMMENT: ${{ inputs.post-comment }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        MODEL_NAME: ${{ inputs.model }}
+        GH_EVENT_NAME: ${{ github.event_name }}
+        GH_EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+        GH_REPOSITORY: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        Write-Host "::group::Step 5 - Post analysis results"
+
+        # Read analysis output
+        $outputFile = Join-Path $env:GITHUB_WORKSPACE "analysis_output.txt"
+        $metaFile   = Join-Path $env:GITHUB_WORKSPACE "analysis_meta.txt"
+
+        if (-not (Test-Path $outputFile)) {
+          Write-Host "::error::Analysis output file not found: $outputFile"
+          exit 1
+        }
+
+        $report = Get-Content -Path $outputFile -Raw -Encoding UTF8
+        $turns  = ""
+        $tokens = ""
+        if (Test-Path $metaFile) {
+          $meta = Get-Content -Path $metaFile -Raw -Encoding UTF8
+          foreach ($line in ($meta -split "`n")) {
+            if ($line -match '^turns=(.+)') { $turns = $Matches[1].Trim() }
+            if ($line -match '^tokens=(.+)') { $tokens = $Matches[1].Trim() }
+          }
+          Write-Host "Analysis completed in $turns turn(s), ~$tokens tokens estimated."
+        }
+
+        # Truncate if over 65000 chars
+        if ($report.Length -gt 65000) {
+          $report = $report.Substring(0, 65000) + "`n`n---`n*Report truncated (exceeded 65000 character limit).*"
+          Write-Host "Report truncated to 65000 characters."
+        }
+
+        # Set GITHUB_OUTPUT
+        # Use delimiter for multiline output
+        $delimiter = "EOF_$(Get-Random)"
+        echo "analysis-result<<$delimiter" >> $env:GITHUB_OUTPUT
+        echo "$report" >> $env:GITHUB_OUTPUT
+        echo "$delimiter" >> $env:GITHUB_OUTPUT
+
+        # Write GITHUB_STEP_SUMMARY
+        echo "$report" >> $env:GITHUB_STEP_SUMMARY
+
+        # Optionally post Issue comment
+        $issueNum = $env:ISSUE_NUMBER
+        if (-not $issueNum -and ($env:GH_EVENT_NAME -eq "issues" -or $env:GH_EVENT_NAME -eq "issue_comment")) {
+          $issueNum = $env:GH_EVENT_ISSUE_NUMBER
+        }
+
+        if ($env:POST_COMMENT -eq "true" -and $issueNum) {
+          Write-Host "Posting comment to Issue #$issueNum ..."
+          $metaSuffix = "`n`n---`n<sub>Model: $env:MODEL_NAME | Turns: $turns | Tokens: ~$tokens</sub>"
+          $commentBody = "<!-- dump-analysis-bot -->`n$report$metaSuffix"
+
+          $apiUrl = "https://api.github.com/repos/$env:GH_REPOSITORY/issues/$issueNum/comments"
+          $headers = @{
+            "Authorization" = "Bearer $env:GH_TOKEN"
+            "Accept"        = "application/vnd.github+json"
+            "User-Agent"    = "mcp-windbg-action"
+          }
+          $body = @{ body = $commentBody } | ConvertTo-Json -Depth 5
+
+          try {
+            Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body $body -ContentType "application/json"
+            Write-Host "Comment posted successfully."
+          } catch {
+            Write-Host "::warning::Failed to post Issue comment: $_"
+          }
+        } else {
+          Write-Host "Skipping Issue comment (post-comment=$env:POST_COMMENT, issue=$issueNum)."
+        }
+
+        Write-Host "::endgroup::"
