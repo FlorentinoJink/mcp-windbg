@@ -187,13 +187,20 @@ class McpClient:
         if self._proc is None:
             return
         log("Shutting down MCP server...")
+        # Capture stderr for debugging
+        try:
+            stderr_data = self._proc.stderr.read().decode("utf-8", errors="replace")
+            if stderr_data.strip():
+                log(f"MCP server stderr:\n{stderr_data[:2000]}")
+        except Exception:
+            pass
         try:
             self._proc.stdin.close()
         except Exception:
             pass
         try:
             self._proc.wait(timeout=10)
-            log("MCP server exited normally.")
+            log(f"MCP server exited (code={self._proc.returncode}).")
         except subprocess.TimeoutExpired:
             log("MCP server did not exit in time, killing...")
             self._proc.kill()
@@ -249,7 +256,7 @@ class McpClient:
                     stderr_out = self._proc.stderr.read().decode("utf-8", errors="replace")
                 except Exception:
                     pass
-                raise McpError(f"MCP server exited unexpectedly (code={self._proc.returncode}). stderr: {stderr_out[:500]}")
+                raise McpError(f"MCP server exited unexpectedly (code={self._proc.returncode}). stderr: {stderr_out[:1000]}")
 
             # Read Content-Length header
             content_length = None
@@ -547,6 +554,17 @@ def main():
     log(f"CDB: {cdb_path}")
     log(f"MCP Server: {mcp_server_path}")
     log(f"Download dir: {download_dir}")
+
+    # -- Validate MCP server binary exists -----------------------------------
+    if not os.path.isfile(mcp_server_path):
+        print(f"::error::MCP server binary not found: {mcp_server_path}", flush=True)
+        print("::endgroup::", flush=True)
+        sys.exit(1)
+    log(f"MCP server binary OK ({os.path.getsize(mcp_server_path)} bytes)")
+
+    # -- Validate CDB exists -------------------------------------------------
+    if not os.path.isfile(cdb_path):
+        log(f"Warning: CDB not found at {cdb_path}, MCP server may fail to execute commands")
 
     # -- Scan for dump/exe files ---------------------------------------------
     file_paths = []
