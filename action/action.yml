@@ -218,44 +218,28 @@ runs:
 
         Write-Host "::endgroup::"
 
-    # ── Step 3: Download mcp-windbg-rs binary ─────────────────────────────
-    - name: Download MCP Server
-      id: download-server
+    # ── Step 3: Build mcp-windbg-rs from source ─────────────────────────
+    - name: Build MCP Server
+      id: build-server
       if: env.SKIP_ANALYSIS != 'true'
       shell: pwsh
       run: |
-        Write-Host "::group::Step 3 - Download mcp-windbg-rs"
+        Write-Host "::group::Step 3 - Build mcp-windbg-rs from source"
 
-        $repo = "FlorentinoJink/mcp-windbg"
-        $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
-
-        Write-Host "Fetching latest release from $apiUrl ..."
-        $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "mcp-windbg-action" }
-
-        $asset = $release.assets | Where-Object { $_.name -like '*.exe' } | Select-Object -First 1
-        if (-not $asset) {
-          Write-Host "::error::No .exe asset found in release $($release.tag_name)"
+        $env:RUSTFLAGS = "-C target-feature=+crt-static"
+        cargo build --release 2>&1 | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::error::Failed to build mcp-windbg-rs"
           exit 1
         }
 
-        $downloadUrl = $asset.browser_download_url
-        $serverPath = Join-Path $env:GITHUB_WORKSPACE "mcp-windbg-rs.exe"
-
-        Write-Host "Downloading $($asset.name) from $downloadUrl ..."
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $serverPath -UseBasicParsing
-
-        Write-Host "Downloaded: $serverPath ($((Get-Item $serverPath).Length) bytes)"
-
-        # Quick sanity check - run with --help to verify binary works
-        Write-Host "Verifying binary..."
-        try {
-          $helpOutput = & $serverPath --help 2>&1
-          Write-Host "Binary OK: $($helpOutput[0])"
-        } catch {
-          Write-Host "::error::Binary verification failed: $_"
+        $serverPath = Join-Path $env:GITHUB_WORKSPACE "target\release\mcp-windbg-rs.exe"
+        if (-not (Test-Path $serverPath)) {
+          Write-Host "::error::Binary not found at $serverPath"
           exit 1
         }
 
+        Write-Host "Built: $serverPath ($((Get-Item $serverPath).Length) bytes)"
         echo "MCP_SERVER_PATH=$serverPath" >> $env:GITHUB_ENV
         Write-Host "::endgroup::"
 
