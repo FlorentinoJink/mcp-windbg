@@ -1,100 +1,64 @@
-# MCP WinDbg (Rust Implementation)
+# mcp-windbg-rs
 
 [中文文档](./README_CN.md) | English
 
-A high-performance Model Context Protocol server for Windows crash dump analysis and remote debugging, implemented in Rust.
+A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) server for Windows debugging — crash dump analysis, remote debugging, and direct program debugging via CDB.
 
-## Quick Start
+Built with Rust and [Tokio](https://tokio.rs/) for async I/O. Ships as a single executable with no runtime dependencies.
 
-### Prerequisites
+## Features
 
-- Windows 10 or higher
-- [Debugging Tools for Windows](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/)
-- Rust 1.70 or higher
+- **Crash dump analysis** — Open `.dmp` files, auto-run `!analyze -v`, inspect threads, modules, and stack traces
+- **Remote debugging** — Connect to remote debug sessions via connection strings
+- **Direct program debugging** — Launch executables under CDB, set breakpoints, step through code, inspect variables
+- **Session management** — Multiple concurrent debug sessions with automatic reuse
+- **Configurable timeouts** — Separate timeouts for initialization (symbol loading) and command execution
 
-### Installation
+## Prerequisites
+
+- Windows 10+
+- [Debugging Tools for Windows](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/) (provides `cdb.exe`)
+
+If CDB is not installed, you can get it via:
+
+```bash
+winget install Microsoft.WinDbg
+```
+
+The server auto-discovers CDB from Windows SDK default paths, WinDbg Preview (Microsoft Store), and `PATH`.
+
+## Installation
+
+### From source
 
 ```bash
 cargo build --release
 ```
 
-The executable will be at `target/release/mcp-windbg-rs.exe`
+Binary: `target/release/mcp-windbg-rs.exe`
 
-### VSCode Configuration
+## Configuration
 
-Add to your VSCode MCP settings (`.vscode/mcp.json` or user settings):
+### VS Code / Kiro
+
+`.vscode/mcp.json`:
 
 ```json
 {
   "servers": {
     "mcp-windbg": {
       "type": "stdio",
-      "command": "D:\\workspace\\mcp-windbg\\target\\release\\mcp-windbg-rs.exe",
-      "args": ["--verbose"],
+      "command": "/path/to/mcp-windbg-rs.exe",
+      "args": [],
       "env": {
-        "_NT_SYMBOL_PATH": "SRV*D:\\Symbols*https://msdl.microsoft.com/download/symbols",
-        "MCP_WINDBG_TIMEOUT": "60",
-        "MCP_WINDBG_INIT_TIMEOUT": "180"
+        "_NT_SYMBOL_PATH": "SRV*C:\\Symbols*https://msdl.microsoft.com/download/symbols"
       }
     }
-  },
-  "inputs": []
+  }
 }
 ```
 
-**Note**: For large dump files or slow symbol downloads, increase `MCP_WINDBG_INIT_TIMEOUT` (default: 120s).
-
-## Roadmap
-
-### Phase 1: Foundation
-- [x] Project structure and dependencies setup
-- [x] Error type system (CdbError, SessionError, ToolError)
-- [x] Shared type definitions (ToolResponse, parameters)
-
-### Phase 2: Core Utilities
-- [x] CDB executable discovery and path resolution
-- [x] Windows registry access for dump file paths
-- [x] Recursive dump file search functionality
-
-### Phase 3: CDB Session Management
-- [x] CdbSession implementation for dump files and remote debugging
-- [x] Async command execution with timeout handling
-- [x] SessionManager with connection pooling and lifecycle management
-
-### Phase 4: MCP Tools
-- [x] `open_windbg_dump` - Crash analysis with !analyze -v
-- [x] `open_windbg_remote` - Remote debugging connection
-- [x] `run_windbg_cmd` - Custom command execution
-- [x] `close_windbg_dump` / `close_windbg_remote` - Session cleanup
-- [x] `list_windbg_dumps` - Dump file discovery
-
-### Phase 5: MCP Server
-- [x] Server configuration and initialization
-- [x] Tool registration and JSON-RPC dispatch
-- [x] Stdio transport implementation
-- [x] CLI with argument parsing
-
-### Phase 6: Documentation
-- [x] Usage guide and examples
-- [x] Configuration reference
-- [x] Troubleshooting guide
-
-## Usage
-
-### Available Tools
-
-- `open_windbg_dump` - Analyze crash dump files
-- `open_windbg_remote` - Connect to remote debugging sessions
-- `run_windbg_cmd` - Execute WinDbg commands
-- `close_windbg_dump` - Close dump file sessions
-- `close_windbg_remote` - Close remote debugging sessions
-- `list_windbg_dumps` - List available crash dumps
-
-### Configuration
-
-#### Alternative Configuration Format
-
-For Claude Desktop, Cline, or other MCP clients that use `mcpServers` format:
+### Claude Desktop / Cline / Other MCP Clients
 
 ```json
 {
@@ -103,111 +67,113 @@ For Claude Desktop, Cline, or other MCP clients that use `mcpServers` format:
       "command": "mcp-windbg-rs",
       "args": [],
       "env": {
-        "_NT_SYMBOL_PATH": "SRV*C:\\Symbols*https://msdl.microsoft.com/download/symbols",
-        "MCP_WINDBG_TIMEOUT": "60",
-        "MCP_WINDBG_INIT_TIMEOUT": "180",
-        "MCP_WINDBG_VERBOSE": "false"
+        "_NT_SYMBOL_PATH": "SRV*C:\\Symbols*https://msdl.microsoft.com/download/symbols"
       }
     }
   }
 }
 ```
 
-#### Environment Variables
+### Environment Variables
 
-- `CDB_PATH` - Custom path to cdb.exe
-- `_NT_SYMBOL_PATH` - Windows symbol path
-- `MCP_WINDBG_TIMEOUT` - Command execution timeout in seconds (default: 30)
-- `MCP_WINDBG_INIT_TIMEOUT` - Initialization timeout in seconds (default: 120)
-- `MCP_WINDBG_VERBOSE` - Enable verbose logging (true/false)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CDB_PATH` | Custom path to `cdb.exe` | Auto-discovered |
+| `_NT_SYMBOL_PATH` | Debug symbol search path | — |
+| `_NT_SOURCE_PATH` | Source file search path | — |
+| `MCP_WINDBG_TIMEOUT` | Command timeout (seconds) | `30` |
+| `MCP_WINDBG_INIT_TIMEOUT` | Init timeout for dump/symbol loading (seconds) | `120` |
+| `MCP_WINDBG_VERBOSE` | Verbose logging (`true`/`false`) | `false` |
 
-#### Command Line Options
+### CLI Options
 
-```bash
+```
 mcp-windbg-rs [OPTIONS]
 
-OPTIONS:
-    --timeout <SECONDS>       Command execution timeout in seconds (default: 30)
-    --init-timeout <SECONDS>  Initialization timeout in seconds (default: 120)
-    --verbose                 Enable verbose logging
-    --help                    Print help information
+  --timeout <SECONDS>       Command execution timeout (default: 30)
+  --init-timeout <SECONDS>  Initialization timeout (default: 120)
+  --verbose                 Enable verbose logging
 ```
 
-**Note**: The initialization timeout is used when opening dump files or connecting to remote targets. Larger dump files or symbol downloads may require more time.
+## Tools
 
-### Usage Examples
+| Tool | Description |
+|------|-------------|
+| `open_windbg_dump` | Open and analyze a crash dump file |
+| `open_windbg_remote` | Connect to a remote debugging session |
+| `launch_debug` | Launch a program under CDB for debugging |
+| `run_windbg_cmd` | Execute any WinDbg/CDB command in a session |
+| `close_windbg_dump` | Close a dump file session |
+| `close_windbg_remote` | Close a remote debugging session |
+| `close_debug` | Close a launch debug session and terminate the program |
+| `list_windbg_dumps` | List `.dmp` files in a directory |
 
-#### Crash Dump Analysis
+## Usage Examples
+
+### Crash Dump Analysis
 
 ```
 Analyze the crash dump at C:\dumps\app.dmp
 ```
 
-#### Remote Debugging
+### Remote Debugging
 
 ```
-Connect to tcp:Port=5005,Server=192.168.0.100 and show me the current thread state
+Connect to tcp:Port=5005,Server=192.168.0.100 and show the current state
 ```
 
-#### Execute Custom Commands
+### Direct Program Debugging
+
+Launch a program, set breakpoints, step through code:
 
 ```
-Run !analyze -v on the opened dump file
+Launch C:\MyApp\app.exe for debugging
 ```
 
-### Troubleshooting
+Then use `run_windbg_cmd` to control execution:
 
-#### CDB Not Found
+```
+bp main          — Set breakpoint at main
+g                — Continue execution
+p                — Step over
+t                — Step into
+k                — Stack trace
+dv               — View local variables
+lsa .            — Show source at current location
+```
 
-If you encounter "CDB executable not found" error:
+The `launch_debug` tool supports optional parameters:
 
-1. Ensure Debugging Tools for Windows is installed
-2. Set `CDB_PATH` environment variable to point to cdb.exe
-3. Or use `--cdb-path` parameter to specify the path
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `program_path` | string | Path to the target program (required) |
+| `arguments` | string[] | Command line arguments |
+| `working_directory` | string | Working directory |
+| `symbols_path` | string | PDB symbol search path |
+| `source_path` | string | Source file path for source-level debugging |
+| `include_stack_trace` | boolean | Include initial stack trace |
+| `include_modules` | boolean | Include loaded modules list |
 
-#### Symbol Loading Issues
+### Close a Session
 
-If symbols fail to load:
+```
+Close the debug session for C:\MyApp\app.exe
+```
 
-1. Set `_NT_SYMBOL_PATH` environment variable
-2. Recommended value: `SRV*C:\Symbols*https://msdl.microsoft.com/download/symbols`
-3. Ensure network connectivity for symbol downloads
+## Troubleshooting
 
-#### Command Timeout
+**CDB not found** — Install via `winget install Microsoft.WinDbg` or set `CDB_PATH` to your `cdb.exe` location.
 
-If commands timeout:
+**Symbols not loading** — Set `_NT_SYMBOL_PATH`. Recommended: `SRV*C:\Symbols*https://msdl.microsoft.com/download/symbols`
 
-1. Increase timeout: `--timeout 60`
-2. Or set environment variable: `MCP_WINDBG_TIMEOUT=60`
-3. Check dump file size and symbol loading status
+**Command timeout** — Increase with `--timeout 60` or `MCP_WINDBG_TIMEOUT=60`. Large dumps and symbol downloads may need higher `MCP_WINDBG_INIT_TIMEOUT`.
 
-## Comparison with Python Version
+## Related
 
-| Feature       | Python          | Rust                 |
-| ------------- | --------------- | -------------------- |
-| Performance   | Good            | Excellent            |
-| Memory Safety | Runtime         | Compile-time         |
-| Concurrency   | asyncio         | Tokio (native async) |
-| Type Safety   | Dynamic         | Static               |
-| Binary Size   | Requires Python | Single executable    |
-| Startup Time  | ~100ms          | ~10ms                |
-
-## Related Links
-
-- [Python Version](https://github.com/svnscha/mcp-windbg)
+- [mcp-windbg (Python)](https://github.com/svnscha/mcp-windbg) — Original Python implementation
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [WinDbg Documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/)
 
 ## License
 
-AGPL-3.0-or-later
-
-This project is licensed under the GNU Affero General Public License v3.0 or later. This means:
-
-- ✅ You can use, modify, and distribute this software
-- ✅ You must disclose the source code of any modifications
-- ⚠️ **If you use this software to provide a network service, you must make the complete source code available to users of that service**
-- ⚠️ Any derivative works must also be licensed under AGPL-3.0
-
-This license prevents companies from taking this code and using it in proprietary services without contributing back to the community.
-
+[AGPL-3.0-or-later](./LICENSE)

@@ -1,100 +1,64 @@
-# MCP WinDbg (Rust 实现版本)
+# mcp-windbg-rs
 
 中文 | [English](./README.md)
 
-一个高性能的 Model Context Protocol (MCP) 服务器，用于 Windows 崩溃转储分析和远程调试，使用 Rust 实现。
+一个 [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) 服务器，用于 Windows 调试 — 崩溃转储分析、远程调试和直接程序调试，基于 CDB 实现。
 
-## 快速开始
+使用 Rust 和 [Tokio](https://tokio.rs/) 构建，编译为单一可执行文件，无运行时依赖。
 
-### 前置要求
+## 功能
 
-- Windows 10 或更高版本
-- [Debugging Tools for Windows](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/)
-- Rust 1.70 或更高版本
+- **崩溃转储分析** — 打开 `.dmp` 文件，自动执行 `!analyze -v`，查看线程、模块和堆栈
+- **远程调试** — 通过连接字符串连接远程调试会话
+- **直接程序调试** — 在 CDB 下启动程序，设置断点、单步执行、查看变量
+- **会话管理** — 支持多个并发调试会话，自动复用已有会话
+- **可配置超时** — 初始化超时（符号加载）和命令执行超时分别配置
 
-### 安装
+## 前置要求
+
+- Windows 10+
+- [Debugging Tools for Windows](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/)（提供 `cdb.exe`）
+
+如果未安装 CDB，可以通过以下命令安装：
+
+```bash
+winget install Microsoft.WinDbg
+```
+
+服务器会自动从 Windows SDK 默认路径、WinDbg Preview（Microsoft Store）和 `PATH` 中查找 CDB。
+
+## 安装
+
+### 从源码构建
 
 ```bash
 cargo build --release
 ```
 
-可执行文件位于 `target/release/mcp-windbg-rs.exe`
+可执行文件：`target/release/mcp-windbg-rs.exe`
 
-### VSCode 配置
+## 配置
 
-在 VSCode MCP 设置中添加（`.vscode/mcp.json` 或用户设置）：
+### VS Code / Kiro
+
+`.vscode/mcp.json`：
 
 ```json
 {
   "servers": {
     "mcp-windbg": {
       "type": "stdio",
-      "command": "D:\\workspace\\mcp-windbg\\target\\release\\mcp-windbg-rs.exe",
-      "args": ["--verbose"],
+      "command": "/path/to/mcp-windbg-rs.exe",
+      "args": [],
       "env": {
-        "_NT_SYMBOL_PATH": "SRV*D:\\Symbols*https://msdl.microsoft.com/download/symbols",
-        "MCP_WINDBG_TIMEOUT": "60",
-        "MCP_WINDBG_INIT_TIMEOUT": "180"
+        "_NT_SYMBOL_PATH": "SRV*C:\\Symbols*https://msdl.microsoft.com/download/symbols"
       }
     }
-  },
-  "inputs": []
+  }
 }
 ```
 
-**注意**：对于大型 dump 文件或符号下载较慢的情况，可以增加 `MCP_WINDBG_INIT_TIMEOUT`（默认：120秒）。
-
-## 开发路线图
-
-### 阶段 1：基础设施
-- [x] 项目结构和依赖配置
-- [x] 错误类型系统（CdbError、SessionError、ToolError）
-- [x] 共享类型定义（ToolResponse、参数类型）
-
-### 阶段 2：核心工具
-- [x] CDB 可执行文件发现和路径解析
-- [x] Windows 注册表访问获取转储文件路径
-- [x] 递归转储文件搜索功能
-
-### 阶段 3：CDB 会话管理
-- [x] CdbSession 实现（支持转储文件和远程调试）
-- [x] 异步命令执行和超时处理
-- [x] SessionManager 连接池和生命周期管理
-
-### 阶段 4：MCP 工具
-- [x] `open_windbg_dump` - 使用 !analyze -v 进行崩溃分析
-- [x] `open_windbg_remote` - 远程调试连接
-- [x] `run_windbg_cmd` - 自定义命令执行
-- [x] `close_windbg_dump` / `close_windbg_remote` - 会话清理
-- [x] `list_windbg_dumps` - 转储文件发现
-
-### 阶段 5：MCP 服务器
-- [x] 服务器配置和初始化
-- [x] 工具注册和 JSON-RPC 分发
-- [x] Stdio 传输实现
-- [x] CLI 参数解析
-
-### 阶段 6：文档
-- [x] 使用指南和示例
-- [x] 配置参考
-- [x] 故障排除指南
-
-## 使用指南
-
-### 可用工具
-
-- `open_windbg_dump` - 分析崩溃转储文件
-- `open_windbg_remote` - 连接到远程调试会话
-- `run_windbg_cmd` - 执行 WinDbg 命令
-- `close_windbg_dump` - 关闭转储文件会话
-- `close_windbg_remote` - 关闭远程调试会话
-- `list_windbg_dumps` - 列出可用的崩溃转储文件
-
-### 配置
-
-#### 其他配置格式
-
-适用于 Claude Desktop、Cline 或其他使用 `mcpServers` 格式的 MCP 客户端：
+### Claude Desktop / Cline / 其他 MCP 客户端
 
 ```json
 {
@@ -103,110 +67,113 @@ cargo build --release
       "command": "mcp-windbg-rs",
       "args": [],
       "env": {
-        "_NT_SYMBOL_PATH": "SRV*C:\\Symbols*https://msdl.microsoft.com/download/symbols",
-        "MCP_WINDBG_TIMEOUT": "60",
-        "MCP_WINDBG_INIT_TIMEOUT": "180",
-        "MCP_WINDBG_VERBOSE": "false"
+        "_NT_SYMBOL_PATH": "SRV*C:\\Symbols*https://msdl.microsoft.com/download/symbols"
       }
     }
   }
 }
 ```
 
-#### 环境变量
+### 环境变量
 
-- `CDB_PATH` - 自定义 cdb.exe 路径
-- `_NT_SYMBOL_PATH` - Windows 符号路径
-- `MCP_WINDBG_TIMEOUT` - 命令执行超时时间（秒），默认：30
-- `MCP_WINDBG_INIT_TIMEOUT` - 初始化超时时间（秒），默认：120
-- `MCP_WINDBG_VERBOSE` - 启用详细日志（true/false）
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `CDB_PATH` | 自定义 `cdb.exe` 路径 | 自动查找 |
+| `_NT_SYMBOL_PATH` | 调试符号搜索路径 | — |
+| `_NT_SOURCE_PATH` | 源文件搜索路径 | — |
+| `MCP_WINDBG_TIMEOUT` | 命令执行超时（秒） | `30` |
+| `MCP_WINDBG_INIT_TIMEOUT` | 初始化超时，用于 dump 加载和符号下载（秒） | `120` |
+| `MCP_WINDBG_VERBOSE` | 详细日志（`true`/`false`） | `false` |
 
-#### 命令行选项
+### 命令行选项
 
-```bash
+```
 mcp-windbg-rs [选项]
 
-选项:
-    --timeout <秒数>          命令执行超时时间（秒），默认：30
-    --init-timeout <秒数>     初始化超时时间（秒），默认：120
-    --verbose                 启用详细日志
-    --help                    显示帮助信息
+  --timeout <秒数>          命令执行超时（默认：30）
+  --init-timeout <秒数>     初始化超时（默认：120）
+  --verbose                 启用详细日志
 ```
 
-**注意**：初始化超时用于打开 dump 文件或连接远程目标时的等待时间。对于大型 dump 文件或需要下载符号的情况，可能需要更长的初始化时间。
+## 工具列表
 
-### 使用示例
+| 工具 | 说明 |
+|------|------|
+| `open_windbg_dump` | 打开并分析崩溃转储文件 |
+| `open_windbg_remote` | 连接远程调试会话 |
+| `launch_debug` | 在 CDB 下启动程序进行调试 |
+| `run_windbg_cmd` | 在会话中执行任意 WinDbg/CDB 命令 |
+| `close_windbg_dump` | 关闭转储文件会话 |
+| `close_windbg_remote` | 关闭远程调试会话 |
+| `close_debug` | 关闭调试会话并终止目标程序 |
+| `list_windbg_dumps` | 列出目录中的 `.dmp` 文件 |
 
-#### 分析崩溃转储
+## 使用示例
+
+### 崩溃转储分析
 
 ```
-分析位于 C:\dumps\app.dmp 的崩溃转储文件
+分析 C:\dumps\app.dmp 这个崩溃转储文件
 ```
 
-#### 远程调试
+### 远程调试
 
 ```
-连接到 tcp:Port=5005,Server=192.168.0.100 并显示当前线程状态
+连接到 tcp:Port=5005,Server=192.168.0.100 并显示当前状态
 ```
 
-#### 执行自定义命令
+### 直接调试程序
+
+启动程序、设置断点、单步执行：
 
 ```
-在已打开的转储文件上执行 !analyze -v 命令
+启动 C:\MyApp\app.exe 进行调试
 ```
 
-### 故障排除
+然后用 `run_windbg_cmd` 控制执行：
 
-#### CDB 未找到
+```
+bp main          — 在 main 设置断点
+g                — 继续执行
+p                — 单步跳过
+t                — 单步进入
+k                — 查看堆栈
+dv               — 查看局部变量
+lsa .            — 显示当前位置的源码
+```
 
-如果遇到 "CDB executable not found" 错误：
+`launch_debug` 工具支持以下可选参数：
 
-1. 确保已安装 Debugging Tools for Windows
-2. 设置 `CDB_PATH` 环境变量指向 cdb.exe
-3. 或使用 `--cdb-path` 参数指定路径
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `program_path` | string | 目标程序路径（必填） |
+| `arguments` | string[] | 命令行参数 |
+| `working_directory` | string | 工作目录 |
+| `symbols_path` | string | PDB 符号搜索路径 |
+| `source_path` | string | 源文件路径，用于源码级调试 |
+| `include_stack_trace` | boolean | 包含初始堆栈跟踪 |
+| `include_modules` | boolean | 包含已加载模块列表 |
 
-#### 符号加载问题
+### 关闭会话
 
-如果符号加载失败：
+```
+关闭 C:\MyApp\app.exe 的调试会话
+```
 
-1. 设置 `_NT_SYMBOL_PATH` 环境变量
-2. 推荐值：`SRV*C:\Symbols*https://msdl.microsoft.com/download/symbols`
-3. 确保有网络连接以下载符号
+## 故障排除
 
-#### 命令超时
+**找不到 CDB** — 执行 `winget install Microsoft.WinDbg` 安装，或设置 `CDB_PATH` 指向 `cdb.exe`。
 
-如果命令执行超时：
+**符号加载失败** — 设置 `_NT_SYMBOL_PATH`，推荐值：`SRV*C:\Symbols*https://msdl.microsoft.com/download/symbols`
 
-1. 增加超时时间：`--timeout 60`
-2. 或设置环境变量：`MCP_WINDBG_TIMEOUT=60`
-3. 检查转储文件大小和符号加载状态
-
-## 与 Python 版本对比
-
-| 特性 | Python | Rust |
-|------|--------|------|
-| 性能 | 良好 | 优秀 |
-| 内存安全 | 运行时 | 编译时 |
-| 并发处理 | asyncio | Tokio (原生异步) |
-| 类型安全 | 动态类型 | 静态类型 |
-| 二进制大小 | 需要 Python 环境 | 单一可执行文件 |
-| 启动时间 | ~100ms | ~10ms |
+**命令超时** — 通过 `--timeout 60` 或 `MCP_WINDBG_TIMEOUT=60` 增加超时。大型 dump 和符号下载可能需要更高的 `MCP_WINDBG_INIT_TIMEOUT`。
 
 ## 相关链接
 
-- [Python 版本](https://github.com/svnscha/mcp-windbg)
+- [mcp-windbg (Python)](https://github.com/svnscha/mcp-windbg) — 原始 Python 实现
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 - [WinDbg 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/)
 
 ## 许可证
 
-AGPL-3.0-or-later
-
-本项目采用 GNU Affero 通用公共许可证 v3.0 或更高版本。这意味着：
-
-- ✅ 你可以使用、修改和分发本软件
-- ✅ 你必须公开任何修改的源代码
-- ⚠️ **如果你使用本软件提供网络服务，必须向该服务的用户提供完整的源代码**
-- ⚠️ 任何衍生作品也必须使用 AGPL-3.0 许可证
-
-此许可证防止公司在不回馈社区的情况下将此代码用于专有服务。
+[AGPL-3.0-or-later](./LICENSE)

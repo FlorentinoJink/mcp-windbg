@@ -180,6 +180,83 @@ impl SessionManager {
         Ok(session_arc)
     }
 
+    /// 获取或创建直接调试会话
+    ///
+    /// 如果会话已存在，返回现有会话；否则创建新会话。
+    ///
+    /// # 参数
+    /// * `program_path` - 目标程序路径
+    /// * `arguments` - 可选的命令行参数
+    /// * `working_directory` - 可选的工作目录
+    /// * `cdb_path` - 可选的自定义 CDB 路径
+    /// * `symbols_path` - 可选的符号路径
+    /// * `source_path` - 可选的源文件路径
+    ///
+    /// # 返回
+    /// 返回会话的 Arc<Mutex> 引用
+    ///
+    /// # 错误
+    /// 如果目标程序不存在或会话创建失败，返回错误
+    pub async fn get_or_create_launch_session(
+        &self,
+        program_path: &Path,
+        arguments: Option<&[String]>,
+        working_directory: Option<&Path>,
+        cdb_path: Option<&Path>,
+        symbols_path: Option<&str>,
+        source_path: Option<&str>,
+    ) -> Result<Arc<Mutex<CdbSession>>, SessionError> {
+        // 检查目标程序是否存在
+        if !program_path.exists() {
+            return Err(SessionError::ProgramNotFound(program_path.to_path_buf()));
+        }
+
+        // 生成会话 ID（使用绝对路径）
+        let session_id = program_path
+            .canonicalize()
+            .unwrap_or_else(|_| program_path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+
+        debug!("Requesting launch session: {}", session_id);
+
+        // 检查会话是否已存在
+        {
+            let sessions = self.sessions.read().await;
+            if let Some(session) = sessions.get(&session_id) {
+                info!("Reusing existing launch session: {}", session_id);
+                return Ok(Arc::clone(session));
+            }
+        }
+
+        // 创建新会话
+        info!("Creating new launch session: {}", session_id);
+        let session = CdbSession::new_launch(
+            program_path,
+            arguments,
+            working_directory,
+            cdb_path,
+            symbols_path,
+            source_path,
+            self.default_timeout,
+            self.default_init_timeout,
+            self.verbose,
+        )
+        .await?;
+
+        let session_arc = Arc::new(Mutex::new(session));
+
+        // 存储会话
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(session_id.clone(), Arc::clone(&session_arc));
+        }
+
+        info!("Launch session created and stored: {}", session_id);
+
+        Ok(session_arc)
+    }
+
     /// 关闭指定会话
     ///
     /// # 参数
@@ -297,6 +374,29 @@ mod tests {
         match result.unwrap_err() {
             SessionError::SessionNotFound(_) => {}
             _ => panic!("Expected SessionNotFound error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_launch_session_program_not_found() {
+        let manager = SessionManager::new(Duration::from_secs(30), Duration::from_secs(120), false);
+        let result = manager
+            .get_or_create_launch_session(
+                Path::new("nonexistent_program.exe"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SessionError::ProgramNotFound(path) => {
+                assert_eq!(path, Path::new("nonexistent_program.exe"));
+            }
+            other => panic!("Expected ProgramNotFound error, got: {:?}", other),
         }
     }
 

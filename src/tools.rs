@@ -254,6 +254,151 @@ pub async fn handle_open_windbg_remote(
     Ok(ToolResponse::text(output))
 }
 
+/// 处理 launch_debug 工具调用
+///
+/// 直接启动目标程序并进入调试状态。
+///
+/// # 参数
+/// * `manager` - 会话管理器
+/// * `params` - 工具参数
+/// * `cdb_path` - 可选的自定义 CDB 路径
+/// * `global_symbols_path` - 全局符号路径（回退）
+/// * `global_source_path` - 全局源文件路径（回退）
+///
+/// # 返回
+/// 返回包含初始调试信息的工具响应
+pub async fn handle_launch_debug(
+    manager: Arc<SessionManager>,
+    params: LaunchDebugParams,
+    cdb_path: Option<&Path>,
+    global_symbols_path: Option<&str>,
+    global_source_path: Option<&str>,
+) -> Result<ToolResponse, ToolError> {
+    info!("Launching debug session: {}", params.program_path);
+
+    // 验证文件路径
+    let program_path = Path::new(&params.program_path);
+    if !program_path.exists() {
+        return Err(ToolError::InvalidParams(format!(
+            "Program does not exist: {}",
+            params.program_path
+        )));
+    }
+
+    // 确定符号路径和源文件路径（参数优先，全局配置回退）
+    let symbols_path = params.symbols_path.as_deref().or(global_symbols_path);
+    let source_path = params.source_path.as_deref().or(global_source_path);
+
+    let working_dir = params.working_directory.as_ref().map(Path::new);
+    let arguments = params.arguments.as_deref();
+
+    // 获取或创建会话
+    let session = manager
+        .get_or_create_launch_session(
+            program_path,
+            arguments,
+            working_dir,
+            cdb_path,
+            symbols_path,
+            source_path,
+        )
+        .await?;
+
+    let mut session_guard = session.lock().await;
+
+    // 构建输出
+    let mut output_lines = Vec::new();
+    output_lines.push(format!("# Debug Session: {}", params.program_path));
+    output_lines.push(String::new());
+
+    // 执行 .lastevent 获取初始断点信息
+    debug!("Executing .lastevent command");
+    output_lines.push("## Last Event".to_string());
+    output_lines.push("```".to_string());
+    match session_guard.send_command(".lastevent").await {
+        Ok(lines) => {
+            output_lines.extend(lines);
+        }
+        Err(e) => {
+            output_lines.push(format!("Error: {}", e));
+        }
+    }
+    output_lines.push("```".to_string());
+    output_lines.push(String::new());
+
+    // 根据参数执行可选命令
+    if params.include_stack_trace {
+        debug!("Executing k command (stack trace)");
+        output_lines.push("## Stack Trace".to_string());
+        output_lines.push("```".to_string());
+        match session_guard.send_command("k").await {
+            Ok(lines) => {
+                output_lines.extend(lines);
+            }
+            Err(e) => {
+                output_lines.push(format!("Error: {}", e));
+            }
+        }
+        output_lines.push("```".to_string());
+        output_lines.push(String::new());
+    }
+
+    if params.include_modules {
+        debug!("Executing lm command (module list)");
+        output_lines.push("## Loaded Modules".to_string());
+        output_lines.push("```".to_string());
+        match session_guard.send_command("lm").await {
+            Ok(lines) => {
+                output_lines.extend(lines);
+            }
+            Err(e) => {
+                output_lines.push(format!("Error: {}", e));
+            }
+        }
+        output_lines.push("```".to_string());
+        output_lines.push(String::new());
+    }
+
+    let output = output_lines.join("\n");
+    info!("Launch debug session completed");
+    Ok(ToolResponse::text(output))
+}
+
+/// 处理 close_debug 工具调用
+///
+/// 关闭直接调试会话，终止目标程序。
+///
+/// # 参数
+/// * `manager` - 会话管理器
+/// * `params` - 工具参数
+///
+/// # 返回
+/// 返回成功消息
+pub async fn handle_close_debug(
+    manager: Arc<SessionManager>,
+    params: CloseDebugParams,
+) -> Result<ToolResponse, ToolError> {
+    info!("Closing debug session: {}", params.program_path);
+
+    // 生成会话 ID（与创建时相同的逻辑）
+    let program_path = Path::new(&params.program_path);
+    let session_id = program_path
+        .canonicalize()
+        .unwrap_or_else(|_| program_path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+
+    // 关闭会话
+    manager.close_session(&session_id).await?;
+
+    info!("Debug session closed");
+
+    Ok(ToolResponse::text(format!(
+        "Debug session closed: {}",
+        params.program_path
+    )))
+}
+
 /// 处理 run_windbg_cmd 工具调用
 ///
 /// 在现有会话中执行自定义 WinDbg 命令。
@@ -284,9 +429,14 @@ pub async fn handle_run_windbg_cmd(
         manager
             .get_or_create_remote_session(connection_string, None, None)
             .await?
+    } else if let Some(program_path) = &params.program_path {
+        let path = Path::new(program_path);
+        manager
+            .get_or_create_launch_session(path, None, None, None, None, None)
+            .await?
     } else {
         return Err(ToolError::InvalidParams(
-            "Either dump_path or connection_string must be provided".to_string(),
+            "One of dump_path, connection_string, or program_path must be provided".to_string(),
         ));
     };
 
@@ -460,11 +610,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_launch_debug_program_not_found() {
+        let manager = Arc::new(SessionManager::new(Duration::from_secs(30), Duration::from_secs(120), false));
+        let params = LaunchDebugParams {
+            program_path: "nonexistent_program.exe".to_string(),
+            arguments: None,
+            working_directory: None,
+            symbols_path: None,
+            source_path: None,
+            include_stack_trace: false,
+            include_modules: false,
+        };
+
+        let result = handle_launch_debug(manager, params, None, None, None).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ToolError::InvalidParams(msg) => {
+                assert!(msg.contains("nonexistent_program.exe"));
+            }
+            other => panic!("Expected InvalidParams error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn test_handle_run_windbg_cmd_invalid_params() {
         let manager = Arc::new(SessionManager::new(Duration::from_secs(30), Duration::from_secs(120), false));
         let params = RunWindbgCmdParams {
             dump_path: None,
             connection_string: None,
+            program_path: None,
             command: "test".to_string(),
         };
 

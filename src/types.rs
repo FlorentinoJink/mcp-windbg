@@ -85,30 +85,71 @@ pub struct OpenWindbgRemoteParams {
 /// run_windbg_cmd 工具的参数
 #[derive(Debug, Deserialize)]
 pub struct RunWindbgCmdParams {
-    /// 转储文件路径（与 connection_string 互斥）
+    /// 转储文件路径（与 connection_string、program_path 互斥）
     pub dump_path: Option<String>,
-    /// 远程连接字符串（与 dump_path 互斥）
+    /// 远程连接字符串（与 dump_path、program_path 互斥）
     pub connection_string: Option<String>,
+    /// 目标程序路径（与 dump_path、connection_string 互斥）
+    pub program_path: Option<String>,
     /// 要执行的 WinDbg 命令
     pub command: String,
 }
 
 impl RunWindbgCmdParams {
-    /// 验证参数：确保 dump_path 和 connection_string 互斥
+    /// 验证参数：确保 dump_path、connection_string、program_path 三者互斥且至少提供一个
     pub fn validate(&self) -> Result<(), String> {
-        match (&self.dump_path, &self.connection_string) {
-            (None, None) => Err("Either dump_path or connection_string must be provided".to_string()),
-            (Some(_), Some(_)) => Err("dump_path and connection_string cannot be provided together".to_string()),
-            _ => Ok(()),
+        let count = [
+            self.dump_path.is_some(),
+            self.connection_string.is_some(),
+            self.program_path.is_some(),
+        ]
+        .iter()
+        .filter(|&&v| v)
+        .count();
+
+        match count {
+            0 => Err("One of dump_path, connection_string, or program_path must be provided".to_string()),
+            1 => Ok(()),
+            _ => Err("dump_path, connection_string, and program_path are mutually exclusive".to_string()),
         }
     }
 
-    /// 获取会话标识符（转储路径或连接字符串）
+    /// 获取会话标识符（转储路径、连接字符串或程序路径）
     pub fn session_identifier(&self) -> Option<&str> {
         self.dump_path
             .as_deref()
             .or(self.connection_string.as_deref())
+            .or(self.program_path.as_deref())
     }
+}
+
+/// launch_debug 工具的参数
+#[derive(Debug, Deserialize)]
+pub struct LaunchDebugParams {
+    /// 目标程序路径（必填）
+    pub program_path: String,
+    /// 命令行参数（可选）
+    #[serde(default)]
+    pub arguments: Option<Vec<String>>,
+    /// 工作目录（可选）
+    pub working_directory: Option<String>,
+    /// 调试符号路径（可选）
+    pub symbols_path: Option<String>,
+    /// 调试源文件路径（可选）
+    pub source_path: Option<String>,
+    /// 是否包含堆栈跟踪
+    #[serde(default)]
+    pub include_stack_trace: bool,
+    /// 是否包含模块信息
+    #[serde(default)]
+    pub include_modules: bool,
+}
+
+/// close_debug 工具的参数
+#[derive(Debug, Deserialize)]
+pub struct CloseDebugParams {
+    /// 目标程序路径
+    pub program_path: String,
 }
 
 /// close_windbg_dump 工具的参数
@@ -156,18 +197,20 @@ mod tests {
 
     #[test]
     fn test_run_windbg_cmd_params_validate() {
-        // 两者都没有提供
+        // 三者都没有提供
         let params = RunWindbgCmdParams {
             dump_path: None,
             connection_string: None,
+            program_path: None,
             command: "test".to_string(),
         };
         assert!(params.validate().is_err());
 
-        // 两者都提供了
+        // dump_path 和 connection_string 都提供了
         let params = RunWindbgCmdParams {
             dump_path: Some("test.dmp".to_string()),
             connection_string: Some("tcp:Port=5005".to_string()),
+            program_path: None,
             command: "test".to_string(),
         };
         assert!(params.validate().is_err());
@@ -176,6 +219,7 @@ mod tests {
         let params = RunWindbgCmdParams {
             dump_path: Some("test.dmp".to_string()),
             connection_string: None,
+            program_path: None,
             command: "test".to_string(),
         };
         assert!(params.validate().is_ok());
@@ -184,6 +228,7 @@ mod tests {
         let params = RunWindbgCmdParams {
             dump_path: None,
             connection_string: Some("tcp:Port=5005".to_string()),
+            program_path: None,
             command: "test".to_string(),
         };
         assert!(params.validate().is_ok());
@@ -194,6 +239,7 @@ mod tests {
         let params = RunWindbgCmdParams {
             dump_path: Some("test.dmp".to_string()),
             connection_string: None,
+            program_path: None,
             command: "test".to_string(),
         };
         assert_eq!(params.session_identifier(), Some("test.dmp"));
@@ -201,6 +247,7 @@ mod tests {
         let params = RunWindbgCmdParams {
             dump_path: None,
             connection_string: Some("tcp:Port=5005".to_string()),
+            program_path: None,
             command: "test".to_string(),
         };
         assert_eq!(params.session_identifier(), Some("tcp:Port=5005"));
@@ -226,6 +273,47 @@ mod tests {
         let params: ListWindbgDumpsParams = serde_json::from_str(json).unwrap();
         assert!(params.directory_path.is_none());
         assert!(params.recursive);
+    }
+
+    #[test]
+    fn test_deserialize_launch_debug_params_full() {
+        let json = r#"{
+            "program_path": "C:\\test\\app.exe",
+            "arguments": ["--flag", "value"],
+            "working_directory": "C:\\test",
+            "symbols_path": "C:\\symbols",
+            "source_path": "C:\\src",
+            "include_stack_trace": true,
+            "include_modules": true
+        }"#;
+        let params: LaunchDebugParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.program_path, "C:\\test\\app.exe");
+        assert_eq!(params.arguments.as_ref().unwrap(), &["--flag", "value"]);
+        assert_eq!(params.working_directory.as_deref(), Some("C:\\test"));
+        assert_eq!(params.symbols_path.as_deref(), Some("C:\\symbols"));
+        assert_eq!(params.source_path.as_deref(), Some("C:\\src"));
+        assert!(params.include_stack_trace);
+        assert!(params.include_modules);
+    }
+
+    #[test]
+    fn test_deserialize_launch_debug_params_minimal() {
+        let json = r#"{"program_path": "app.exe"}"#;
+        let params: LaunchDebugParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.program_path, "app.exe");
+        assert!(params.arguments.is_none());
+        assert!(params.working_directory.is_none());
+        assert!(params.symbols_path.is_none());
+        assert!(params.source_path.is_none());
+        assert!(!params.include_stack_trace);
+        assert!(!params.include_modules);
+    }
+
+    #[test]
+    fn test_deserialize_close_debug_params() {
+        let json = r#"{"program_path": "C:\\test\\app.exe"}"#;
+        let params: CloseDebugParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.program_path, "C:\\test\\app.exe");
     }
 
     #[test]

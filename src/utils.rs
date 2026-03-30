@@ -44,8 +44,7 @@ pub fn find_cdb_executable(custom_path: Option<&Path>) -> Option<PathBuf> {
         r"C:\Program Files (x86)\Windows Kits\8.1\Debuggers\x64\cdb.exe",
         // Windows 8.1 SDK (x86)
         r"C:\Program Files (x86)\Windows Kits\8.1\Debuggers\x86\cdb.exe",
-        // WinDbg Preview from Microsoft Store (x64)
-        r"C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2306.14001.0_x64__8wekyb3d8bbwe\cdb.exe",
+        // WinDbg Preview 通过 find_windbg_preview_cdb() 动态搜索
         // 旧版本路径
         r"C:\Program Files\Debugging Tools for Windows (x64)\cdb.exe",
         r"C:\Program Files (x86)\Debugging Tools for Windows (x86)\cdb.exe",
@@ -59,9 +58,55 @@ pub fn find_cdb_executable(custom_path: Option<&Path>) -> Option<PathBuf> {
         }
     }
 
+    // 搜索 WinDbg Preview（Microsoft Store 安装，版本号不固定）
+    if let Some(path) = find_windbg_preview_cdb() {
+        return Some(path);
+    }
+
     // 尝试在 PATH 环境变量中查找
     if let Ok(path_env) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_env) {
+            let cdb_path = dir.join("cdb.exe");
+            if cdb_path.exists() && cdb_path.is_file() {
+                return Some(cdb_path);
+            }
+        }
+    }
+
+    None
+}
+
+/// 搜索 WinDbg Preview 中的 CDB（Microsoft Store 安装）
+///
+/// WinDbg Preview 安装在 WindowsApps 目录下，版本号不固定，
+/// 需要动态搜索匹配 `Microsoft.WinDbg_*` 的目录。
+///
+/// # 返回
+/// 如果找到 CDB，返回其路径；否则返回 None
+fn find_windbg_preview_cdb() -> Option<PathBuf> {
+    let apps_dir = PathBuf::from(r"C:\Program Files\WindowsApps");
+    if !apps_dir.exists() {
+        return None;
+    }
+
+    // 读取目录，查找 Microsoft.WinDbg_ 开头的子目录
+    if let Ok(entries) = std::fs::read_dir(&apps_dir) {
+        let mut windbg_dirs: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with("Microsoft.WinDbg_") && n.contains("_x64_"))
+                        .unwrap_or(false)
+            })
+            .collect();
+
+        // 按名称降序排序，优先使用最新版本
+        windbg_dirs.sort_by(|a, b| b.cmp(a));
+
+        for dir in windbg_dirs {
             let cdb_path = dir.join("cdb.exe");
             if cdb_path.exists() && cdb_path.is_file() {
                 return Some(cdb_path);

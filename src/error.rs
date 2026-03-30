@@ -11,7 +11,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum CdbError {
     /// CDB 可执行文件在默认位置中未找到
-    #[error("CDB executable not found")]
+    #[error("CDB executable not found. Install Debugging Tools for Windows via:\n  winget install Microsoft.WinDbg\nOr install Windows SDK from: https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/")]
     ExecutableNotFound,
 
     /// 启动 CDB 进程失败
@@ -49,6 +49,10 @@ pub enum SessionError {
     /// 指定的转储文件未找到
     #[error("Dump file not found: {0}")]
     DumpFileNotFound(PathBuf),
+
+    /// 指定的目标程序未找到
+    #[error("Program not found: {0}")]
+    ProgramNotFound(PathBuf),
 
     /// 会话 ID 格式无效
     #[error("Invalid session ID: {0}")]
@@ -106,7 +110,7 @@ mod tests {
     #[test]
     fn test_cdb_error_display() {
         let err = CdbError::ExecutableNotFound;
-        assert_eq!(err.to_string(), "CDB executable not found");
+        assert!(err.to_string().contains("CDB executable not found"));
 
         let err = CdbError::CommandTimeout(Duration::from_secs(30));
         assert_eq!(err.to_string(), "Command timeout after 30s");

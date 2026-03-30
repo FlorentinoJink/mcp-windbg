@@ -18,6 +18,8 @@ pub struct ServerConfig {
     pub cdb_path: Option<PathBuf>,
     /// 符号路径
     pub symbols_path: Option<String>,
+    /// 源文件路径
+    pub source_path: Option<String>,
     /// 命令执行超时时间
     pub timeout: Duration,
     /// 初始化超时时间
@@ -31,6 +33,7 @@ impl Default for ServerConfig {
         Self {
             cdb_path: None,
             symbols_path: None,
+            source_path: None,
             timeout: Duration::from_secs(30),
             init_timeout: Duration::from_secs(120),
             verbose: false,
@@ -51,6 +54,11 @@ impl ServerConfig {
         // 读取符号路径
         if let Ok(path) = std::env::var("_NT_SYMBOL_PATH") {
             config.symbols_path = Some(path);
+        }
+
+        // 读取源文件路径
+        if let Ok(path) = std::env::var("_NT_SOURCE_PATH") {
+            config.source_path = Some(path);
         }
 
         // 读取命令超时时间
@@ -214,11 +222,15 @@ impl McpServer {
                     "properties": {
                         "dump_path": {
                             "type": "string",
-                            "description": "Dump file path (mutually exclusive with connection_string)"
+                            "description": "Dump file path (mutually exclusive with connection_string and program_path)"
                         },
                         "connection_string": {
                             "type": "string",
-                            "description": "Remote connection string (mutually exclusive with dump_path)"
+                            "description": "Remote connection string (mutually exclusive with dump_path and program_path)"
+                        },
+                        "program_path": {
+                            "type": "string",
+                            "description": "Target program path for launch debug session (mutually exclusive with dump_path and connection_string)"
                         },
                         "command": {
                             "type": "string",
@@ -254,6 +266,61 @@ impl McpServer {
                         }
                     },
                     "required": ["connection_string"]
+                }),
+            },
+            ToolDefinition {
+                name: "launch_debug".to_string(),
+                description: "Launch a program and start debugging it with CDB".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "program_path": {
+                            "type": "string",
+                            "description": "Path to the target program to debug"
+                        },
+                        "arguments": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Command line arguments for the target program"
+                        },
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Working directory for the target program"
+                        },
+                        "symbols_path": {
+                            "type": "string",
+                            "description": "Debug symbols path (PDB files search path)"
+                        },
+                        "source_path": {
+                            "type": "string",
+                            "description": "Source file path for source-level debugging"
+                        },
+                        "include_stack_trace": {
+                            "type": "boolean",
+                            "description": "Whether to include stack trace in initial output",
+                            "default": false
+                        },
+                        "include_modules": {
+                            "type": "boolean",
+                            "description": "Whether to include loaded modules in initial output",
+                            "default": false
+                        }
+                    },
+                    "required": ["program_path"]
+                }),
+            },
+            ToolDefinition {
+                name: "close_debug".to_string(),
+                description: "Close a launch debug session and terminate the target program".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "program_path": {
+                            "type": "string",
+                            "description": "Path to the target program to close"
+                        }
+                    },
+                    "required": ["program_path"]
                 }),
             },
             ToolDefinition {
@@ -331,6 +398,21 @@ impl McpServer {
             "list_windbg_dumps" => {
                 let params: ListWindbgDumpsParams = serde_json::from_value(arguments)?;
                 Ok(tools::handle_list_windbg_dumps(params).await?)
+            }
+            "launch_debug" => {
+                let params: LaunchDebugParams = serde_json::from_value(arguments)?;
+                Ok(tools::handle_launch_debug(
+                    Arc::clone(&self.session_manager),
+                    params,
+                    self.config.cdb_path.as_deref(),
+                    self.config.symbols_path.as_deref(),
+                    self.config.source_path.as_deref(),
+                )
+                .await?)
+            }
+            "close_debug" => {
+                let params: CloseDebugParams = serde_json::from_value(arguments)?;
+                Ok(tools::handle_close_debug(Arc::clone(&self.session_manager), params).await?)
             }
             _ => Err(ServerError::ProtocolError(format!(
                 "Unknown tool: {}",
@@ -506,6 +588,36 @@ impl rmcp::ServerHandler for McpServer {
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             }
+            "launch_debug" => {
+                let params: LaunchDebugParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        rmcp::ErrorData::invalid_params(
+                            format!("Failed to parse parameters: {}", e),
+                            None,
+                        )
+                    })?;
+                tools::handle_launch_debug(
+                    Arc::clone(&self.session_manager),
+                    params,
+                    self.config.cdb_path.as_deref(),
+                    self.config.symbols_path.as_deref(),
+                    self.config.source_path.as_deref(),
+                )
+                .await
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            }
+            "close_debug" => {
+                let params: CloseDebugParams =
+                    serde_json::from_value(arguments).map_err(|e| {
+                        rmcp::ErrorData::invalid_params(
+                            format!("Failed to parse parameters: {}", e),
+                            None,
+                        )
+                    })?;
+                tools::handle_close_debug(Arc::clone(&self.session_manager), params)
+                    .await
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            }
             _ => {
                 return Err(rmcp::ErrorData::invalid_request(
                     format!("Unknown tool: {}", tool_name),
@@ -543,6 +655,7 @@ mod tests {
         assert!(!config.verbose);
         assert!(config.cdb_path.is_none());
         assert!(config.symbols_path.is_none());
+        assert!(config.source_path.is_none());
     }
 
     #[test]

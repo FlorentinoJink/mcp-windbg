@@ -20,6 +20,8 @@ enum SessionType {
     Dump,
     /// 远程调试会话
     Remote,
+    /// 直接启动程序调试会话
+    Launch,
 }
 
 /// CDB 会话
@@ -217,6 +219,117 @@ impl CdbSession {
         Ok(session)
     }
 
+    /// 创建新的 CDB 会话（直接启动程序调试）
+    ///
+    /// # 参数
+    /// * `program_path` - 目标程序路径
+    /// * `arguments` - 可选的命令行参数
+    /// * `working_directory` - 可选的工作目录
+    /// * `cdb_path` - 可选的自定义 CDB 路径
+    /// * `symbols_path` - 可选的符号路径
+    /// * `source_path` - 可选的源文件路径
+    /// * `timeout` - 命令执行超时时间
+    /// * `init_timeout` - 初始化超时时间
+    /// * `verbose` - 是否启用详细日志
+    ///
+    /// # 返回
+    /// 返回新创建的 CDB 会话
+    ///
+    /// # 错误
+    /// 如果 CDB 可执行文件未找到或进程启动失败，返回错误
+    pub async fn new_launch(
+        program_path: &Path,
+        arguments: Option<&[String]>,
+        working_directory: Option<&Path>,
+        cdb_path: Option<&Path>,
+        symbols_path: Option<&str>,
+        source_path: Option<&str>,
+        timeout: Duration,
+        init_timeout: Duration,
+        verbose: bool,
+    ) -> Result<Self, CdbError> {
+        // 查找 CDB 可执行文件
+        let cdb_exe = utils::find_cdb_executable(cdb_path).ok_or(CdbError::ExecutableNotFound)?;
+
+        info!("Using CDB: {}", cdb_exe.display());
+        info!("Launching program: {}", program_path.display());
+
+        // 构建命令：cdb.exe -c ".echo CDB_READY" <program_path> [args...]
+        let mut cmd = Command::new(&cdb_exe);
+        cmd.arg("-c") // 初始命令
+            .arg(".echo CDB_READY") // 启动完成标记
+            .arg(program_path); // 目标程序路径
+
+        // 添加程序的命令行参数
+        if let Some(args) = arguments {
+            for arg in args {
+                cmd.arg(arg);
+            }
+        }
+
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // 设置符号路径
+        if let Some(sym_path) = symbols_path {
+            cmd.env("_NT_SYMBOL_PATH", sym_path);
+        }
+
+        // 设置源文件路径
+        if let Some(src_path) = source_path {
+            cmd.env("_NT_SOURCE_PATH", src_path);
+        }
+
+        // 设置工作目录
+        if let Some(work_dir) = working_directory {
+            cmd.current_dir(work_dir);
+        }
+
+        // 启动进程
+        let mut process = cmd
+            .spawn()
+            .map_err(|e| CdbError::ProcessStartFailed(e.to_string()))?;
+
+        // 获取 stdin 和 stdout
+        let stdin = process
+            .stdin
+            .take()
+            .ok_or_else(|| CdbError::ProcessStartFailed("Failed to get stdin".to_string()))?;
+
+        let stdout = process
+            .stdout
+            .take()
+            .ok_or_else(|| CdbError::ProcessStartFailed("Failed to get stdout".to_string()))?;
+
+        let stdout_reader = Arc::new(Mutex::new(BufReader::new(stdout)));
+
+        // 生成会话 ID（使用目标程序的绝对路径）
+        let session_id = program_path
+            .canonicalize()
+            .unwrap_or_else(|_| program_path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+
+        let mut session = Self {
+            session_id,
+            process,
+            stdin,
+            stdout_reader,
+            timeout,
+            init_timeout,
+            verbose,
+            session_type: SessionType::Launch,
+        };
+
+        // 等待 CDB 启动完成
+        session.wait_for_ready().await?;
+
+        info!("CDB launch session started");
+
+        Ok(session)
+    }
+
     /// 获取会话 ID
     pub fn session_id(&self) -> &str {
         &self.session_id
@@ -229,19 +342,21 @@ impl CdbSession {
         debug!("Waiting for CDB to start (timeout: {:?})...", self.init_timeout);
 
         let mut reader = self.stdout_reader.lock().await;
-        let mut line = String::new();
+        let mut buf = Vec::new();
 
         // 使用配置的初始化超时
         // 对于大型 dump 文件或需要下载符号的情况，可能需要更长时间
         let wait_result = tokio::time::timeout(self.init_timeout, async {
             loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
                     Ok(0) => {
                         // EOF
                         return Err(CdbError::ProcessTerminated);
                     }
                     Ok(_) => {
+                        // 使用有损 UTF-8 转换，处理非 UTF-8 编码（如 GBK/CP936）
+                        let line = String::from_utf8_lossy(&buf);
                         if self.verbose {
                             debug!("CDB output: {}", line.trim());
                         }
@@ -322,7 +437,7 @@ impl CdbSession {
     async fn read_until_marker(&mut self, marker: &str) -> Result<Vec<String>, CdbError> {
         let mut output = Vec::new();
         let mut reader = self.stdout_reader.lock().await;
-        let mut line = String::new();
+        let mut buf = Vec::new();
         let mut lines_read = 0;
 
         debug!("Waiting for marker: {}", marker);
@@ -330,8 +445,8 @@ impl CdbSession {
         // 使用超时读取输出
         let read_result = tokio::time::timeout(self.timeout, async {
             loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf).await {
                     Ok(0) => {
                         // EOF - 进程终止
                         warn!("CDB process terminated unexpectedly (read {} lines)", lines_read);
@@ -339,6 +454,8 @@ impl CdbSession {
                     }
                     Ok(_) => {
                         lines_read += 1;
+                        // 使用有损 UTF-8 转换，处理非 UTF-8 编码（如 GBK/CP936）
+                        let line = String::from_utf8_lossy(&buf);
                         let trimmed = line.trim();
 
                         if self.verbose {
@@ -394,8 +511,9 @@ impl CdbSession {
 
         // 根据会话类型发送不同的退出命令
         let quit_command = match self.session_type {
-            SessionType::Dump => {
-                // 转储文件会话：使用 'q' 命令退出
+            SessionType::Dump | SessionType::Launch => {
+                // 转储文件会话和直接启动调试会话：使用 'q' 命令退出
+                // Launch 会话的 'q' 命令会终止被调试程序并退出 CDB
                 "q\n"
             }
             SessionType::Remote => {
