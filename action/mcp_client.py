@@ -182,6 +182,19 @@ class McpClient:
             raise McpError(f"Failed to start MCP server: {exc}") from exc
         log(f"MCP server started (pid={self._proc.pid})")
 
+        # Start background thread to read and log stderr
+        import threading
+        def _read_stderr():
+            try:
+                for line in self._proc.stderr:
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        log(f"[MCP-SERVER] {text}")
+            except Exception:
+                pass
+        self._stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        self._stderr_thread.start()
+
     def shutdown(self):
         """Terminate the MCP Server subprocess gracefully."""
         if self._proc is None:
@@ -288,6 +301,10 @@ class McpClient:
 
     def initialize(self):
         """Perform MCP initialize handshake."""
+        # Give server a moment to start up
+        time.sleep(0.5)
+        if self._proc.poll() is not None:
+            raise McpError(f"MCP server exited immediately (code={self._proc.returncode})")
         log("Sending MCP initialize...")
         req_id = self._send_request("initialize", {
             "protocolVersion": "2024-11-05",
