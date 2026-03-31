@@ -218,28 +218,29 @@ runs:
 
         Write-Host "::endgroup::"
 
-    # ── Step 3: Build mcp-windbg-rs from source ─────────────────────────
-    - name: Build MCP Server
-      id: build-server
+    # ── Step 3: Download mcp-windbg-rs binary ─────────────────────────────
+    - name: Download MCP Server
+      id: download-server
       if: env.SKIP_ANALYSIS != 'true'
       shell: pwsh
       run: |
-        Write-Host "::group::Step 3 - Build mcp-windbg-rs from source"
+        Write-Host "::group::Step 3 - Download mcp-windbg-rs"
 
-        $env:RUSTFLAGS = "-C target-feature=+crt-static"
-        cargo build --release 2>&1 | ForEach-Object { Write-Host $_ }
-        if ($LASTEXITCODE -ne 0) {
-          Write-Host "::error::Failed to build mcp-windbg-rs"
+        $repo = "FlorentinoJink/mcp-windbg"
+        $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
+
+        $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "mcp-windbg-action" }
+        $asset = $release.assets | Where-Object { $_.name -like '*.exe' } | Select-Object -First 1
+        if (-not $asset) {
+          Write-Host "::error::No .exe asset in release $($release.tag_name)"
           exit 1
         }
 
-        $serverPath = Join-Path $env:GITHUB_WORKSPACE "target\release\mcp-windbg-rs.exe"
-        if (-not (Test-Path $serverPath)) {
-          Write-Host "::error::Binary not found at $serverPath"
-          exit 1
-        }
+        $serverPath = Join-Path $env:GITHUB_WORKSPACE "mcp-windbg-rs.exe"
+        Write-Host "Downloading $($asset.name) ..."
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $serverPath -UseBasicParsing
 
-        Write-Host "Built: $serverPath ($((Get-Item $serverPath).Length) bytes)"
+        Write-Host "Downloaded: $serverPath ($((Get-Item $serverPath).Length) bytes)"
         echo "MCP_SERVER_PATH=$serverPath" >> $env:GITHUB_ENV
         Write-Host "::endgroup::"
 

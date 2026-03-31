@@ -200,24 +200,20 @@ class McpClient:
         if self._proc is None:
             return
         log("Shutting down MCP server...")
-        # Capture stderr for debugging
-        try:
-            stderr_data = self._proc.stderr.read().decode("utf-8", errors="replace")
-            if stderr_data.strip():
-                log(f"MCP server stderr:\n{stderr_data[:2000]}")
-        except Exception:
-            pass
         try:
             self._proc.stdin.close()
         except Exception:
             pass
         try:
-            self._proc.wait(timeout=10)
+            self._proc.wait(timeout=5)
             log(f"MCP server exited (code={self._proc.returncode}).")
         except subprocess.TimeoutExpired:
-            log("MCP server did not exit in time, killing...")
+            log("MCP server did not exit in 5s, killing...")
             self._proc.kill()
-            self._proc.wait(timeout=5)
+            try:
+                self._proc.wait(timeout=3)
+            except Exception:
+                pass
             log("MCP server killed.")
 
     # -- low-level transport -------------------------------------------------
